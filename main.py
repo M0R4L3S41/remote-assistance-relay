@@ -1,338 +1,669 @@
 #!/usr/bin/env python3
 """
-Servidor Relay CORREGIDO para Railway
-Soluciona el error de socket y maneja imágenes grandes correctamente
+🚀 SERVIDOR RELAY 10/10 - VERSIÓN ULTIMATE
+Optimizado para máximo rendimiento en escritorio remoto
 """
 
-import socket
-import threading
+import asyncio
 import json
 import time
 import random
 import string
 import os
-from datetime import datetime
+import logging
+import signal
+import sys
+import zlib
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from typing import Dict, Optional, Set, Any
+from collections import deque
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
-class RobustRelayServer:
-    def __init__(self):
-        # Railway proporciona el puerto automáticamente
-        self.port = int(os.environ.get('PORT', 8888))
-        self.host = '0.0.0.0'  # Escuchar en todas las interfaces
-        
-        # Almacenar sesiones activas
-        self.sessions = {}  # {session_id: {'server': socket, 'client': socket}}
-        self.running = False
-        
-        print(f"🚀 Robust Relay Server v3.1 iniciando en puerto {self.port}")
-        
-    def generate_session_id(self):
-        """Generar ID de sesión de 6 dígitos"""
-        return ''.join(random.choices(string.digits, k=6))
+# ======================== CONFIGURACIÓN PROFESIONAL ========================
+@dataclass
+class RelayConfig:
+    """Configuración centralizada del servidor"""
+    port: int = int(os.environ.get('PORT', 8888))
+    host: str = os.environ.get('HOST', '0.0.0.0')
+    max_connections: int = int(os.environ.get('MAX_CONNECTIONS', 100))
+    target_fps: int = int(os.environ.get('TARGET_FPS', 30))
+    frame_buffer_size: int = int(os.environ.get('FRAME_BUFFER_SIZE', 3))
+    compression_level: int = int(os.environ.get('COMPRESSION_LEVEL', 6))
+    log_level: str = os.environ.get('LOG_LEVEL', 'INFO')
+    max_message_size: int = int(os.environ.get('MAX_MESSAGE_SIZE', 10 * 1024 * 1024))  # 10MB
+    heartbeat_interval: int = int(os.environ.get('HEARTBEAT_INTERVAL', 30))
+    session_timeout: int = int(os.environ.get('SESSION_TIMEOUT', 300))  # 5 minutos
+
+# ======================== FRAME BUFFER INTELIGENTE ========================
+class IntelligentFrameBuffer:
+    """Buffer que mantiene solo los frames más recientes y descarta antiguos"""
     
-    def start(self):
-        """Iniciar el servidor relay"""
+    def __init__(self, max_size: int = 3):
+        self.max_size = max_size
+        self.frames = deque(maxlen=max_size)
+        self.lock = asyncio.Lock()
+        self.last_frame_time = 0
+        self.frame_count = 0
+        
+    async def add_frame(self, frame_data: Any) -> bool:
+        """Agregar frame, descartando automáticamente los viejos"""
+        async with self.lock:
+            current_time = time.time()
+            
+            # Rate limiting - máximo 60 FPS
+            if current_time - self.last_frame_time < 1.0/60:
+                return False  # Descarta frame por rate limiting
+            
+            # Agregar frame (automáticamente descarta el más viejo si está lleno)
+            self.frames.append({
+                'data': frame_data,
+                'timestamp': current_time,
+                'frame_id': self.frame_count
+            })
+            
+            self.last_frame_time = current_time
+            self.frame_count += 1
+            return True
+    
+    async def get_latest_frame(self) -> Optional[Any]:
+        """Obtener el frame más reciente y limpiar buffer"""
+        async with self.lock:
+            if not self.frames:
+                return None
+            
+            # Obtener el más reciente
+            latest = self.frames[-1]
+            
+            # Limpiar frames antiguos (mantener solo el último)
+            self.frames.clear()
+            self.frames.append(latest)
+            
+            return latest['data']
+    
+    async def get_stats(self) -> Dict[str, Any]:
+        """Estadísticas del buffer"""
+        async with self.lock:
+            return {
+                'buffer_size': len(self.frames),
+                'total_frames': self.frame_count,
+                'fps': self.frame_count / max(time.time() - (self.frames[0]['timestamp'] if self.frames else time.time()), 1)
+            }
+
+# ======================== COMPRESIÓN AVANZADA ========================
+class AdvancedCompressor:
+    """Sistema de compresión optimizado para imágenes y datos"""
+    
+    @staticmethod
+    def compress_data(data: bytes, level: int = 6) -> bytes:
+        """Comprimir datos con zlib optimizado"""
         try:
-            # CORREGIDO: Usar solo AF_INET (IPv4)
-            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            
-            # Configurar socket para manejar datos grandes
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            
-            # Intentar configurar buffers más grandes (puede fallar en algunos sistemas)
-            try:
-                self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1048576)  # 1MB buffer
-                self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1048576)  # 1MB buffer
-                print("✅ Buffers grandes configurados")
-            except OSError:
-                print("⚠️ No se pudieron configurar buffers grandes, usando por defecto")
-            
-            self.server_socket.bind((self.host, self.port))
-            self.server_socket.listen(50)
+            return zlib.compress(data, level)
+        except Exception:
+            return data  # Fallback sin compresión
+    
+    @staticmethod
+    def decompress_data(data: bytes) -> bytes:
+        """Descomprimir datos"""
+        try:
+            return zlib.decompress(data)
+        except Exception:
+            return data  # Fallback sin descompresión
+    
+    @staticmethod
+    def compress_json(obj: Any, compression_level: int = 6) -> bytes:
+        """Comprimir objeto JSON"""
+        json_str = json.dumps(obj, separators=(',', ':'))
+        json_bytes = json_str.encode('utf-8')
+        
+        # Solo comprimir si vale la pena (>1KB)
+        if len(json_bytes) > 1024:
+            compressed = AdvancedCompressor.compress_data(json_bytes, compression_level)
+            if len(compressed) < len(json_bytes) * 0.8:  # Solo si reduce al menos 20%
+                return b'COMPRESSED:' + compressed
+        
+        return json_bytes
+
+# ======================== MÉTRICAS Y MONITOREO ========================
+class ServerMetrics:
+    """Sistema de métricas para monitoreo en tiempo real"""
+    
+    def __init__(self):
+        self.start_time = time.time()
+        self.total_connections = 0
+        self.active_connections = 0
+        self.total_messages = 0
+        self.total_bytes_sent = 0
+        self.total_bytes_received = 0
+        self.session_count = 0
+        self.frame_stats = {'total': 0, 'dropped': 0, 'compressed': 0}
+        self.error_count = 0
+        
+        # Estadísticas por minuto
+        self.minute_stats = deque(maxlen=60)
+        self.last_minute_update = time.time()
+        
+    def record_connection(self):
+        self.total_connections += 1
+        self.active_connections += 1
+    
+    def record_disconnection(self):
+        self.active_connections = max(0, self.active_connections - 1)
+    
+    def record_message(self, size_bytes: int = 0):
+        self.total_messages += 1
+        self.total_bytes_received += size_bytes
+        
+    def record_sent(self, size_bytes: int = 0):
+        self.total_bytes_sent += size_bytes
+    
+    def record_frame(self, compressed: bool = False, dropped: bool = False):
+        self.frame_stats['total'] += 1
+        if compressed:
+            self.frame_stats['compressed'] += 1
+        if dropped:
+            self.frame_stats['dropped'] += 1
+    
+    def record_error(self):
+        self.error_count += 1
+    
+    def get_stats(self) -> Dict[str, Any]:
+        uptime = time.time() - self.start_time
+        return {
+            'uptime_seconds': uptime,
+            'active_connections': self.active_connections,
+            'total_connections': self.total_connections,
+            'total_messages': self.total_messages,
+            'bytes_sent': self.total_bytes_sent,
+            'bytes_received': self.total_bytes_received,
+            'session_count': self.session_count,
+            'frame_stats': self.frame_stats,
+            'error_count': self.error_count,
+            'messages_per_second': self.total_messages / max(uptime, 1),
+            'avg_connection_time': uptime / max(self.total_connections, 1)
+        }
+
+# ======================== SESIÓN AVANZADA ========================
+@dataclass
+class AdvancedSession:
+    """Sesión con capacidades avanzadas"""
+    session_id: str
+    created_at: datetime
+    server_writer: Optional[asyncio.StreamWriter] = None
+    client_writer: Optional[asyncio.StreamWriter] = None
+    server_id: str = ""
+    client_id: str = ""
+    frame_buffer: IntelligentFrameBuffer = field(default_factory=lambda: IntelligentFrameBuffer())
+    last_activity: datetime = field(default_factory=datetime.now)
+    total_messages: int = 0
+    compression_enabled: bool = True
+    
+    def is_complete(self) -> bool:
+        return self.server_writer is not None and self.client_writer is not None
+    
+    def is_expired(self, timeout_seconds: int = 300) -> bool:
+        return (datetime.now() - self.last_activity).total_seconds() > timeout_seconds
+    
+    def update_activity(self):
+        self.last_activity = datetime.now()
+        self.total_messages += 1
+
+# ======================== SERVIDOR RELAY ULTIMATE ========================
+class UltimateRelayServer:
+    """Servidor relay optimizado para máximo rendimiento"""
+    
+    def __init__(self, config: RelayConfig):
+        self.config = config
+        self.sessions: Dict[str, AdvancedSession] = {}
+        self.metrics = ServerMetrics()
+        self.running = False
+        self.server = None
+        
+        # Thread pool para operaciones blocking
+        self.thread_pool = ThreadPoolExecutor(max_workers=4)
+        
+        # Configurar logging
+        self.setup_logging()
+        
+        # Configurar graceful shutdown
+        self.setup_signal_handlers()
+        
+        self.logger.info("🚀 Ultimate Relay Server iniciado", extra={
+            'config': {
+                'port': config.port,
+                'max_connections': config.max_connections,
+                'target_fps': config.target_fps
+            }
+        })
+    
+    def setup_logging(self):
+        """Configurar logging estructurado"""
+        logging.basicConfig(
+            level=getattr(logging, self.config.log_level),
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.StreamHandler(sys.stdout),
+                logging.FileHandler('relay_ultimate.log', mode='a')
+            ]
+        )
+        self.logger = logging.getLogger('UltimateRelay')
+    
+    def setup_signal_handlers(self):
+        """Configurar manejo de señales para graceful shutdown"""
+        def signal_handler(signum, frame):
+            self.logger.info(f"📢 Recibida señal {signum}, cerrando gracefully...")
+            asyncio.create_task(self.graceful_shutdown())
+        
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+    
+    def generate_session_id(self) -> str:
+        """Generar ID único de sesión"""
+        while True:
+            session_id = ''.join(random.choices(string.digits, k=6))
+            if session_id not in self.sessions:
+                return session_id
+    
+    async def start(self):
+        """Iniciar servidor con asyncio"""
+        try:
+            self.server = await asyncio.start_server(
+                self.handle_client,
+                self.config.host,
+                self.config.port,
+                limit=self.config.max_message_size
+            )
             
             self.running = True
-            print(f"✅ Robust Relay Server ACTIVO en {self.host}:{self.port}")
-            print("🔗 Esperando conexiones...")
-            print("🕐 Tiempo actual:", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
             
-            while self.running:
-                try:
-                    client_socket, address = self.server_socket.accept()
-                    print(f"📱 Nueva conexión desde {address[0]}:{address[1]} a las {datetime.now().strftime('%H:%M:%S')}")
-                    
-                    # Configurar socket del cliente para manejar datos grandes
-                    client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                    
-                    # Intentar configurar buffers del cliente
-                    try:
-                        client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1048576)
-                        client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1048576)
-                    except OSError:
-                        pass  # No crítico si falla
-                    
-                    client_socket.settimeout(60)  # 1 minuto timeout
-                    
-                    # Crear hilo para manejar cada cliente
-                    thread = threading.Thread(
-                        target=self.handle_client,
-                        args=(client_socket, address),
-                        daemon=True
-                    )
-                    thread.start()
-                    
-                except socket.error as e:
-                    if self.running:
-                        print(f"❌ Error aceptando conexión: {e}")
-                        time.sleep(1)
-                        
+            # Iniciar tareas de mantenimiento
+            asyncio.create_task(self.cleanup_task())
+            asyncio.create_task(self.heartbeat_task())
+            asyncio.create_task(self.metrics_task())
+            
+            self.logger.info(f"✅ Servidor activo en {self.config.host}:{self.config.port}")
+            self.logger.info(f"📊 Configuración: FPS={self.config.target_fps}, Buffers={self.config.frame_buffer_size}")
+            
+            async with self.server:
+                await self.server.serve_forever()
+                
         except Exception as e:
-            print(f"❌ Error crítico iniciando servidor: {e}")
-            import traceback
-            traceback.print_exc()
+            self.logger.error(f"❌ Error crítico: {e}", exc_info=True)
+            await self.graceful_shutdown()
     
-    def handle_client(self, client_socket, address):
-        """Manejar cada cliente conectado con buffer robusto"""
-        client_id = f"{address[0]}:{address[1]}:{int(time.time())}"
-        print(f"🔄 Manejando cliente: {client_id}")
+    async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        """Manejar cliente con asyncio optimizado"""
+        client_addr = writer.get_extra_info('peername')
+        client_id = f"{client_addr[0]}:{client_addr[1]}:{int(time.time())}"
         
-        # Buffer para manejar mensajes largos
-        message_buffer = b""
+        self.metrics.record_connection()
+        self.logger.info(f"📱 Nueva conexión: {client_id}")
+        
+        buffer = b""
         
         try:
             while self.running:
                 try:
-                    # Recibir datos en chunks grandes
-                    chunk = client_socket.recv(65536)  # 64KB chunks
+                    # Leer con timeout
+                    chunk = await asyncio.wait_for(reader.read(65536), timeout=30.0)
                     if not chunk:
-                        print(f"🔌 Cliente {client_id} envió datos vacíos - desconectando")
                         break
                     
-                    message_buffer += chunk
+                    buffer += chunk
                     
-                    # Procesar mensajes completos (terminados en \n)
-                    while b'\n' in message_buffer:
-                        message_data, message_buffer = message_buffer.split(b'\n', 1)
+                    # Procesar mensajes completos
+                    while b'\n' in buffer:
+                        message_data, buffer = buffer.split(b'\n', 1)
                         
-                        try:
-                            # Decodificar el mensaje
-                            decoded_message = message_data.decode('utf-8').strip()
+                        if message_data:
+                            await self.process_message_ultimate(
+                                message_data, writer, client_id
+                            )
                             
-                            if decoded_message:  # Solo procesar si no está vacío
-                                try:
-                                    message = json.loads(decoded_message)
-                                    self.process_message(client_socket, client_id, message)
-                                except json.JSONDecodeError as e:
-                                    # Solo log para mensajes pequeños (evitar spam con imágenes)
-                                    if len(decoded_message) < 100:
-                                        print(f"⚠️ Error JSON en mensaje corto de {client_id}: {e}")
-                                        print(f"   Mensaje: {decoded_message[:50]}...")
-                                    # Para mensajes largos (imágenes), intentar recuperar
-                                    else:
-                                        print(f"⚠️ Mensaje largo corrupto de {client_id} ({len(decoded_message)} chars) - descartando")
-                                        
-                        except UnicodeDecodeError as e:
-                            print(f"⚠️ Error decodificando UTF-8 de {client_id}: {e}")
-                            continue
-                            
-                except socket.timeout:
-                    # Enviar ping periódico
-                    try:
-                        ping_msg = {'type': 'ping', 'timestamp': time.time()}
-                        self.send_message_robust(client_socket, ping_msg)
-                    except:
-                        print(f"❌ No se pudo enviar ping a {client_id}")
-                        break
+                except asyncio.TimeoutError:
+                    # Enviar heartbeat
+                    await self.send_message_ultimate(writer, {
+                        'type': 'heartbeat',
+                        'timestamp': time.time()
+                    })
                     continue
                     
-                except (ConnectionResetError, socket.error, BrokenPipeError) as e:
-                    print(f"🔌 Conexión perdida con {client_id}: {e}")
-                    break
-                    
         except Exception as e:
-            print(f"❌ Error inesperado manejando {client_id}: {e}")
-            import traceback
-            traceback.print_exc()
+            self.logger.error(f"❌ Error manejando {client_id}: {e}")
+            self.metrics.record_error()
         finally:
-            self.cleanup_client(client_socket)
-            try:
-                client_socket.close()
-            except:
-                pass
-            print(f"🗑️ Cliente {client_id} limpiado y desconectado")
+            await self.cleanup_client(writer)
+            self.metrics.record_disconnection()
+            self.logger.info(f"🔌 Cliente desconectado: {client_id}")
     
-    def process_message(self, sender_socket, sender_id, message):
-        """Procesar mensajes de los clientes"""
-        msg_type = message.get('type')
-        
-        # Solo log para mensajes que no sean screen_update (evitar spam)
-        if msg_type != 'relay_data' or message.get('data', {}).get('type') != 'screen_update':
-            print(f"📨 Procesando mensaje '{msg_type}' de {sender_id}")
-        
-        if msg_type == 'create_session':
-            # El servidor crea una nueva sesión
-            session_id = self.generate_session_id()
+    async def process_message_ultimate(self, message_data: bytes, writer: asyncio.StreamWriter, client_id: str):
+        """Procesar mensaje con optimizaciones avanzadas"""
+        try:
+            # Intentar descomprimir si es necesario
+            if message_data.startswith(b'COMPRESSED:'):
+                message_data = AdvancedCompressor.decompress_data(message_data[11:])
             
-            # Verificar que el ID sea único
-            while session_id in self.sessions:
-                session_id = self.generate_session_id()
+            # Decodificar JSON
+            message_str = message_data.decode('utf-8')
+            message = json.loads(message_str)
             
-            self.sessions[session_id] = {
-                'server': sender_socket,
-                'client': None,
-                'created_at': datetime.now(),
-                'server_id': sender_id
-            }
+            self.metrics.record_message(len(message_data))
             
-            response = {
-                'type': 'session_created',
-                'session_id': session_id,
-                'timestamp': time.time()
-            }
+            msg_type = message.get('type')
             
-            print(f"🎯 Creando sesión {session_id} para {sender_id}")
+            # Log solo para mensajes importantes (no screen_update)
+            if msg_type not in ['relay_data', 'heartbeat']:
+                self.logger.info(f"📨 {msg_type} de {client_id}")
             
-            success = self.send_message_robust(sender_socket, response)
-            if success:
-                print(f"✅ Respuesta de sesión enviada exitosamente")
-            else:
-                print(f"❌ Error enviando respuesta de sesión")
-            
-        elif msg_type == 'join_session':
-            # El cliente se une a una sesión
-            session_id = message.get('session_id')
-            print(f"🔗 Cliente {sender_id} intentando unirse a sesión {session_id}")
-            
-            if session_id in self.sessions and self.sessions[session_id]['client'] is None:
-                self.sessions[session_id]['client'] = sender_socket
-                self.sessions[session_id]['client_id'] = sender_id
+            # Procesar según tipo
+            if msg_type == 'create_session':
+                await self.handle_create_session(writer, client_id)
                 
-                # Notificar al servidor que el cliente se conectó
-                server_response = {
-                    'type': 'client_connected',
-                    'session_id': session_id,
-                    'client_id': sender_id
-                }
-                self.send_message_robust(self.sessions[session_id]['server'], server_response)
+            elif msg_type == 'join_session':
+                await self.handle_join_session(message, writer, client_id)
                 
-                # Confirmar al cliente que se unió
-                client_response = {
+            elif msg_type == 'relay_data':
+                await self.handle_relay_data_ultimate(message, writer)
+                
+            elif msg_type == 'heartbeat':
+                await self.send_message_ultimate(writer, {
+                    'type': 'heartbeat_response',
+                    'timestamp': time.time()
+                })
+                
+        except Exception as e:
+            self.logger.error(f"❌ Error procesando mensaje de {client_id}: {e}")
+            self.metrics.record_error()
+    
+    async def handle_create_session(self, writer: asyncio.StreamWriter, client_id: str):
+        """Crear nueva sesión optimizada"""
+        session_id = self.generate_session_id()
+        
+        session = AdvancedSession(
+            session_id=session_id,
+            created_at=datetime.now(),
+            server_writer=writer,
+            server_id=client_id
+        )
+        
+        self.sessions[session_id] = session
+        self.metrics.session_count += 1
+        
+        response = {
+            'type': 'session_created',
+            'session_id': session_id,
+            'timestamp': time.time(),
+            'server_config': {
+                'target_fps': self.config.target_fps,
+                'compression_enabled': True
+            }
+        }
+        
+        await self.send_message_ultimate(writer, response)
+        self.logger.info(f"🎯 Sesión {session_id} creada para {client_id}")
+    
+    async def handle_join_session(self, message: Dict, writer: asyncio.StreamWriter, client_id: str):
+        """Unirse a sesión con validación"""
+        session_id = message.get('session_id')
+        
+        if session_id in self.sessions:
+            session = self.sessions[session_id]
+            
+            if session.client_writer is None:
+                session.client_writer = writer
+                session.client_id = client_id
+                session.update_activity()
+                
+                # Notificar al servidor
+                if session.server_writer:
+                    await self.send_message_ultimate(session.server_writer, {
+                        'type': 'client_connected',
+                        'session_id': session_id,
+                        'client_id': client_id
+                    })
+                
+                # Confirmar al cliente
+                await self.send_message_ultimate(writer, {
                     'type': 'session_joined',
-                    'session_id': session_id
-                }
-                self.send_message_robust(sender_socket, client_response)
+                    'session_id': session_id,
+                    'server_config': {
+                        'target_fps': self.config.target_fps,
+                        'compression_enabled': session.compression_enabled
+                    }
+                })
                 
-                print(f"🤝 Cliente {sender_id} unido exitosamente a sesión {session_id}")
+                self.logger.info(f"🤝 Cliente {client_id} unido a sesión {session_id}")
             else:
-                error_response = {
+                await self.send_message_ultimate(writer, {
                     'type': 'error',
-                    'message': 'Sesión no encontrada o ya ocupada'
-                }
-                self.send_message_robust(sender_socket, error_response)
-                print(f"❌ {sender_id} no pudo unirse a sesión {session_id}")
+                    'message': 'Sesión ya ocupada'
+                })
+        else:
+            await self.send_message_ultimate(writer, {
+                'type': 'error',
+                'message': 'Sesión no encontrada'
+            })
+    
+    async def handle_relay_data_ultimate(self, message: Dict, sender_writer: asyncio.StreamWriter):
+        """Retransmisión de datos con frame buffer inteligente"""
+        session_id = message.get('session_id')
+        data = message.get('data', {})
         
-        elif msg_type == 'relay_data':
-            # Retransmitir datos entre servidor y cliente
-            session_id = message.get('session_id')
-            data = message.get('data')
+        if session_id not in self.sessions:
+            return
+        
+        session = self.sessions[session_id]
+        session.update_activity()
+        
+        # Determinar destinatario
+        if sender_writer == session.server_writer:
+            target_writer = session.client_writer
+            target_name = "cliente"
+        elif sender_writer == session.client_writer:
+            target_writer = session.server_writer
+            target_name = "servidor"
+        else:
+            return
+        
+        if not target_writer:
+            return
+        
+        # Manejo especial para screen_update (usar frame buffer)
+        if data.get('type') == 'screen_update':
+            # Agregar al frame buffer (puede ser descartado si hay muchos)
+            frame_added = await session.frame_buffer.add_frame(data)
             
-            if session_id in self.sessions:
-                session = self.sessions[session_id]
-                
-                # Determinar quién es el destinatario
-                if sender_socket == session['server']:
-                    target = session['client']
-                    target_name = "cliente"
-                elif sender_socket == session['client']:
-                    target = session['server']
-                    target_name = "servidor"
-                else:
-                    print(f"⚠️ Socket desconocido intentando retransmitir en sesión {session_id}")
-                    return
-                
-                if target:
+            if frame_added:
+                # Obtener el frame más reciente del buffer
+                latest_frame = await session.frame_buffer.get_latest_frame()
+                if latest_frame:
                     relay_message = {
                         'type': 'relayed_data',
-                        'data': data,
+                        'data': latest_frame,
                         'session_id': session_id
                     }
-                    success = self.send_message_robust(target, relay_message)
-                    
-                    # Solo log para mensajes que no sean screen_update
-                    if data and data.get('type') != 'screen_update':
-                        if success:
-                            print(f"🔄 Datos retransmitidos a {target_name} en sesión {session_id}")
-                        else:
-                            print(f"❌ Error retransmitiendo a {target_name} en sesión {session_id}")
+                    await self.send_message_ultimate(target_writer, relay_message)
+                    self.metrics.record_frame(compressed=session.compression_enabled)
                 else:
-                    print(f"⚠️ No hay {target_name} conectado en sesión {session_id}")
-        
-        elif msg_type == 'ping':
-            # Responder a ping para mantener conexión viva
-            pong = {'type': 'pong', 'timestamp': time.time()}
-            self.send_message_robust(sender_socket, pong)
-        
+                    self.metrics.record_frame(dropped=True)
+            else:
+                self.metrics.record_frame(dropped=True)
         else:
-            print(f"❓ Tipo de mensaje desconocido: {msg_type}")
+            # Para otros tipos de mensaje, envío directo
+            relay_message = {
+                'type': 'relayed_data',
+                'data': data,
+                'session_id': session_id
+            }
+            await self.send_message_ultimate(target_writer, relay_message)
     
-    def send_message_robust(self, socket, message):
-        """Enviar mensaje de forma robusta con manejo de errores mejorado"""
+    async def send_message_ultimate(self, writer: asyncio.StreamWriter, message: Dict) -> bool:
+        """Envío optimizado con compresión"""
         try:
-            # JSON compacto para reducir tamaño
-            data = json.dumps(message, separators=(',', ':')) + '\n'
-            encoded_data = data.encode('utf-8')
+            # Comprimir mensaje si es grande
+            data = AdvancedCompressor.compress_json(message, self.config.compression_level)
+            data += b'\n'
             
-            # Enviar en chunks si es muy grande
-            total_sent = 0
-            chunk_size = 32768  # 32KB chunks para ser más conservador
+            writer.write(data)
+            await writer.drain()
             
-            while total_sent < len(encoded_data):
-                try:
-                    end_pos = min(total_sent + chunk_size, len(encoded_data))
-                    chunk = encoded_data[total_sent:end_pos]
-                    sent = socket.send(chunk)
-                    
-                    if sent == 0:
-                        print("❌ Socket cerrado durante envío")
-                        return False
-                    total_sent += sent
-                except socket.error as e:
-                    print(f"❌ Error enviando chunk: {e}")
-                    return False
-            
+            self.metrics.record_sent(len(data))
             return True
             
-        except (socket.error, BrokenPipeError, ConnectionResetError) as e:
-            print(f"❌ Error de socket enviando mensaje: {e}")
-            return False
         except Exception as e:
-            print(f"❌ Error inesperado enviando mensaje: {e}")
+            self.logger.error(f"❌ Error enviando mensaje: {e}")
+            self.metrics.record_error()
             return False
     
-    def cleanup_client(self, client_socket):
-        """Limpiar cuando un cliente se desconecta"""
+    async def cleanup_client(self, writer: asyncio.StreamWriter):
+        """Limpiar cliente desconectado"""
         for session_id, session in list(self.sessions.items()):
-            if session.get('server') == client_socket or session.get('client') == client_socket:
+            if session.server_writer == writer or session.client_writer == writer:
                 # Notificar al otro extremo
-                disconnect_msg = {'type': 'session_closed', 'session_id': session_id}
+                disconnect_msg = {
+                    'type': 'session_closed',
+                    'session_id': session_id,
+                    'reason': 'peer_disconnected'
+                }
                 
-                if session.get('server') and session['server'] != client_socket:
-                    self.send_message_robust(session['server'], disconnect_msg)
-                if session.get('client') and session['client'] != client_socket:
-                    self.send_message_robust(session['client'], disconnect_msg)
+                if session.server_writer and session.server_writer != writer:
+                    await self.send_message_ultimate(session.server_writer, disconnect_msg)
+                if session.client_writer and session.client_writer != writer:
+                    await self.send_message_ultimate(session.client_writer, disconnect_msg)
                 
                 del self.sessions[session_id]
-                print(f"🗑️ Sesión {session_id} eliminada por desconexión")
+                self.logger.info(f"🗑️ Sesión {session_id} eliminada")
+    
+    async def cleanup_task(self):
+        """Tarea de limpieza periódica"""
+        while self.running:
+            try:
+                # Limpiar sesiones expiradas
+                expired_sessions = [
+                    sid for sid, session in self.sessions.items()
+                    if session.is_expired(self.config.session_timeout)
+                ]
+                
+                for session_id in expired_sessions:
+                    session = self.sessions[session_id]
+                    self.logger.info(f"⏰ Sesión {session_id} expirada, eliminando")
+                    
+                    # Notificar a los clientes
+                    disconnect_msg = {
+                        'type': 'session_closed',
+                        'session_id': session_id,
+                        'reason': 'timeout'
+                    }
+                    
+                    if session.server_writer:
+                        await self.send_message_ultimate(session.server_writer, disconnect_msg)
+                    if session.client_writer:
+                        await self.send_message_ultimate(session.client_writer, disconnect_msg)
+                    
+                    del self.sessions[session_id]
+                
+                await asyncio.sleep(60)  # Limpiar cada minuto
+                
+            except Exception as e:
+                self.logger.error(f"❌ Error en tarea de limpieza: {e}")
+                await asyncio.sleep(10)
+    
+    async def heartbeat_task(self):
+        """Tarea de heartbeat para mantener conexiones vivas"""
+        while self.running:
+            try:
+                heartbeat_msg = {
+                    'type': 'server_heartbeat',
+                    'timestamp': time.time(),
+                    'active_sessions': len(self.sessions)
+                }
+                
+                # Enviar heartbeat a todas las sesiones activas
+                for session in self.sessions.values():
+                    if session.server_writer:
+                        await self.send_message_ultimate(session.server_writer, heartbeat_msg)
+                    if session.client_writer:
+                        await self.send_message_ultimate(session.client_writer, heartbeat_msg)
+                
+                await asyncio.sleep(self.config.heartbeat_interval)
+                
+            except Exception as e:
+                self.logger.error(f"❌ Error en heartbeat: {e}")
+                await asyncio.sleep(5)
+    
+    async def metrics_task(self):
+        """Tarea de métricas y logging de estadísticas"""
+        while self.running:
+            try:
+                stats = self.metrics.get_stats()
+                
+                # Log estadísticas cada 5 minutos
+                self.logger.info(f"📊 Stats: {stats['active_connections']} conexiones, "
+                               f"{stats['messages_per_second']:.1f} msg/s, "
+                               f"{stats['frame_stats']['total']} frames "
+                               f"({stats['frame_stats']['dropped']} descartados)")
+                
+                await asyncio.sleep(300)  # Cada 5 minutos
+                
+            except Exception as e:
+                self.logger.error(f"❌ Error en métricas: {e}")
+                await asyncio.sleep(60)
+    
+    async def graceful_shutdown(self):
+        """Cierre graceful del servidor"""
+        self.logger.info("🛑 Iniciando cierre graceful...")
+        self.running = False
+        
+        # Notificar a todos los clientes
+        disconnect_msg = {
+            'type': 'server_shutdown',
+            'message': 'Servidor reiniciándose',
+            'timestamp': time.time()
+        }
+        
+        for session in self.sessions.values():
+            if session.server_writer:
+                await self.send_message_ultimate(session.server_writer, disconnect_msg)
+            if session.client_writer:
+                await self.send_message_ultimate(session.client_writer, disconnect_msg)
+        
+        # Cerrar servidor
+        if self.server:
+            self.server.close()
+            await self.server.wait_closed()
+        
+        # Estadísticas finales
+        final_stats = self.metrics.get_stats()
+        self.logger.info(f"📈 Estadísticas finales: {final_stats}")
+        
+        self.logger.info("✅ Servidor cerrado gracefully")
 
-if __name__ == "__main__":
-    print("🚀 Iniciando Robust Relay Server...")
-    relay = RobustRelayServer()
+# ======================== PUNTO DE ENTRADA ========================
+async def main():
+    """Función principal"""
+    print("🚀 Iniciando Ultimate Relay Server...")
+    
+    config = RelayConfig()
+    server = UltimateRelayServer(config)
     
     try:
-        relay.start()
+        await server.start()
     except KeyboardInterrupt:
-        print("\n🛑 Deteniendo servidor...")
-        relay.running = False
+        print("\n🛑 Interrupción por teclado")
     except Exception as e:
         print(f"❌ Error fatal: {e}")
         import traceback
         traceback.print_exc()
+    finally:
+        await server.graceful_shutdown()
+
+if __name__ == "__main__":
+    # Configurar asyncio para mejor rendimiento
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Terminado por usuario")
