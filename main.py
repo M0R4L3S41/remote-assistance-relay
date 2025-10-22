@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Servidor Relay MEJORADO con manejo robusto de imágenes grandes
-Soluciona el problema de corrupción en transmisión de pantalla
+Servidor Relay CORREGIDO para Railway
+Soluciona el error de socket y maneja imágenes grandes correctamente
 """
 
 import socket
@@ -23,7 +23,7 @@ class RobustRelayServer:
         self.sessions = {}  # {session_id: {'server': socket, 'client': socket}}
         self.running = False
         
-        print(f"🚀 Robust Relay Server v3.0 iniciando en puerto {self.port}")
+        print(f"🚀 Robust Relay Server v3.1 iniciando en puerto {self.port}")
         
     def generate_session_id(self):
         """Generar ID de sesión de 6 dígitos"""
@@ -32,13 +32,20 @@ class RobustRelayServer:
     def start(self):
         """Iniciar el servidor relay"""
         try:
-            self.server_socket = socket.socket(socket.AF_INET, socket.AF_INET6)
+            # CORREGIDO: Usar solo AF_INET (IPv4)
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             
             # Configurar socket para manejar datos grandes
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1048576)  # 1MB buffer
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1048576)  # 1MB buffer
+            
+            # Intentar configurar buffers más grandes (puede fallar en algunos sistemas)
+            try:
+                self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1048576)  # 1MB buffer
+                self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1048576)  # 1MB buffer
+                print("✅ Buffers grandes configurados")
+            except OSError:
+                print("⚠️ No se pudieron configurar buffers grandes, usando por defecto")
             
             self.server_socket.bind((self.host, self.port))
             self.server_socket.listen(50)
@@ -55,8 +62,14 @@ class RobustRelayServer:
                     
                     # Configurar socket del cliente para manejar datos grandes
                     client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                    client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1048576)  # 1MB buffer
-                    client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1048576)  # 1MB buffer
+                    
+                    # Intentar configurar buffers del cliente
+                    try:
+                        client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1048576)
+                        client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1048576)
+                    except OSError:
+                        pass  # No crítico si falla
+                    
                     client_socket.settimeout(60)  # 1 minuto timeout
                     
                     # Crear hilo para manejar cada cliente
@@ -88,7 +101,7 @@ class RobustRelayServer:
         try:
             while self.running:
                 try:
-                    # Recibir datos en chunks más grandes
+                    # Recibir datos en chunks grandes
                     chunk = client_socket.recv(65536)  # 64KB chunks
                     if not chunk:
                         print(f"🔌 Cliente {client_id} envió datos vacíos - desconectando")
@@ -264,14 +277,20 @@ class RobustRelayServer:
     def send_message_robust(self, socket, message):
         """Enviar mensaje de forma robusta con manejo de errores mejorado"""
         try:
-            data = json.dumps(message, separators=(',', ':')) + '\n'  # JSON compacto
+            # JSON compacto para reducir tamaño
+            data = json.dumps(message, separators=(',', ':')) + '\n'
             encoded_data = data.encode('utf-8')
             
             # Enviar en chunks si es muy grande
             total_sent = 0
+            chunk_size = 32768  # 32KB chunks para ser más conservador
+            
             while total_sent < len(encoded_data):
                 try:
-                    sent = socket.send(encoded_data[total_sent:])
+                    end_pos = min(total_sent + chunk_size, len(encoded_data))
+                    chunk = encoded_data[total_sent:end_pos]
+                    sent = socket.send(chunk)
+                    
                     if sent == 0:
                         print("❌ Socket cerrado durante envío")
                         return False
